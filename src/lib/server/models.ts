@@ -334,6 +334,10 @@ const addEndpoint = (m: Awaited<ReturnType<typeof processModel>>) => ({
 						return await endpoints.cohere(args);
 					case "langserve":
 						return await endpoints.langserve(args);
+					case "databricks":
+						return await endpoints.databricks(args);
+					case "databricks-azure":
+						return await endpoints["databricks-azure"](args);
 					default:
 						// for legacy reason
 						return endpoints.tgi(args);

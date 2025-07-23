@@ -35,6 +35,14 @@ import {
 	endpointInferenceClient,
 	endpointInferenceClientParametersSchema,
 } from "./inference-client/endpointInferenceClient";
+import {
+	endpointDatabricks,
+	endpointDatabricksParametersSchema,
+} from "./databricks/endpointDatabricks";
+import {
+	endpointDatabricksAzure,
+	endpointDatabricksAzureParametersSchema,
+} from "./databricks-azure/endpointDatabricksAzure";
 
 export type EndpointMessage = Omit<Message, "id">;
 
@@ -82,6 +90,8 @@ export const endpoints = {
 	langserve: endpointLangserve,
 	local: endpointLocal,
 	inferenceClient: endpointInferenceClient,
+	databricks: endpointDatabricks,
+	"databricks-azure": endpointDatabricksAzure,
 };
 
 export const endpointSchema = z.discriminatedUnion("type", [
@@ -100,5 +110,7 @@ export const endpointSchema = z.discriminatedUnion("type", [
 	endpointLangserveParametersSchema,
 	endpointLocalParametersSchema,
 	endpointInferenceClientParametersSchema,
+	endpointDatabricksParametersSchema,
+	endpointDatabricksAzureParametersSchema,
 ]);
 export default endpoints;
