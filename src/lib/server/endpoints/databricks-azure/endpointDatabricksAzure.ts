@@ -76,7 +76,7 @@ async function getAccessToken(
 	clientId: string,
 	clientSecret: string,
 	tenantId: string,
-	resourceId: string = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+	resourceId: string = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
 ): Promise<string> {
 	const cacheKey = `${clientId}:${tenantId}:${resourceId}`;
 	const cached = tokenCache.get(cacheKey);
@@ -87,13 +87,13 @@ async function getAccessToken(
 	}
 
 	// Request new token from Azure AD
-	const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/token`;
+	const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
 
 	const params = new URLSearchParams({
 		grant_type: "client_credentials",
 		client_id: clientId,
 		client_secret: clientSecret,
-		resource: `https://${resourceId}/`,
+		scope: "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default",
 	});
 
 	try {
@@ -632,7 +632,7 @@ export async function endpointDatabricksAzure(
 
 									// Handle Azure Databricks agent format (custom agents with tools)
 									if (chunk.delta) {
-										// Handle tool calls
+										// Handle tool calls and yield them immediately when they appear
 										if (chunk.delta.tool_calls && Array.isArray(chunk.delta.tool_calls)) {
 											for (const toolCall of chunk.delta.tool_calls as AzureDatabricksToolCall[]) {
 												if (toolCall.id && toolCall.function?.name) {
@@ -648,31 +648,14 @@ export async function endpointDatabricksAzure(
 												}
 											}
 
-											// Yield tool calls
+											// Yield tool calls immediately (Azure Databricks doesn't use finish_reason)
 											if (toolCalls.length > 0) {
 												yield prepareToolCalls(toolCalls, tokenId++);
 												toolCalls.length = 0; // Clear processed tool calls
 											}
 										}
 
-										// Handle tool results (when role is "tool")
-										if (chunk.delta.role === "tool" && chunk.delta.content) {
-											const toolResult = chunk.delta.content;
-											generatedText += `[Tool Result: ${toolResult}]\n\n`;
-
-											yield {
-												token: {
-													id: tokenId++,
-													text: `[Tool Result: ${toolResult}]\n\n`,
-													logprob: 0,
-													special: false,
-												},
-												generated_text: null,
-												details: null,
-											} satisfies TextGenerationStreamOutput;
-										}
-
-										// Handle regular content from agent
+										// Handle regular content from agent (including initial message with tool calls)
 										if (chunk.delta.content && chunk.delta.role === "assistant") {
 											const content = chunk.delta.content;
 											generatedText += content;
@@ -688,6 +671,9 @@ export async function endpointDatabricksAzure(
 												details: null,
 											} satisfies TextGenerationStreamOutput;
 										}
+
+										// Skip tool results - they should be handled by the chat UI automatically
+										// Don't yield anything for role: "tool" chunks
 									}
 									// Handle standard OpenAI format (fallback)
 									else if (chunk.choices?.[0]?.delta?.content) {
@@ -707,7 +693,9 @@ export async function endpointDatabricksAzure(
 									}
 
 									// Handle finish_reason (both formats)
-									if (chunk.choices?.[0]?.finish_reason || chunk.delta?.finish_reason) {
+									const finishReason =
+										chunk.choices?.[0]?.finish_reason || chunk.delta?.finish_reason;
+									if (finishReason) {
 										yield {
 											token: {
 												id: tokenId++,
