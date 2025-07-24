@@ -1,6 +1,60 @@
 import { z } from "zod";
 import type { Endpoint, EndpointMessage } from "../endpoints";
 import type { TextGenerationStreamOutput } from "@huggingface/inference";
+import type { ToolCall } from "$lib/types/Tool";
+
+// Types for Azure Databricks tool calls
+type AzureDatabricksToolCall = {
+	id: string;
+	type: "function";
+	function: {
+		name: string;
+		arguments: string;
+	};
+};
+
+type ToolCallWithParameters = {
+	toolCall: ToolCall;
+	parameterJsonString: string;
+};
+
+/**
+ * Prepares tool calls for output in TextGenerationStreamOutput format
+ * @param toolCallsWithParameters Array of tool calls with parameters
+ * @param tokenId Current token ID
+ * @returns TextGenerationStreamOutput with tool calls
+ */
+function prepareToolCalls(
+	toolCallsWithParameters: ToolCallWithParameters[],
+	tokenId: number
+): TextGenerationStreamOutput {
+	const toolCalls: ToolCall[] = [];
+
+	for (const toolCallWithParameters of toolCallsWithParameters) {
+		// Parse the JSON parameters
+		const s = toolCallWithParameters.parameterJsonString.replace(/\n/g, "");
+		const params = JSON.parse(s);
+
+		const toolCall = toolCallWithParameters.toolCall;
+		for (const name in params) {
+			toolCall.parameters[name] = params[name];
+		}
+
+		toolCalls.push(toolCall);
+	}
+
+	return {
+		token: {
+			id: tokenId,
+			text: "",
+			logprob: 0,
+			special: false,
+			toolCalls,
+		} as TextGenerationStreamOutput["token"] & { toolCalls?: ToolCall[] },
+		generated_text: null,
+		details: null,
+	};
+}
 
 // Token cache for OAuth2 tokens
 interface TokenCache {
@@ -422,7 +476,7 @@ export async function endpointDatabricksAzure(
 		messages,
 		preprompt,
 		generateSettings,
-		tools, // eslint-disable-line @typescript-eslint/no-unused-vars
+		tools,
 		toolResults, // eslint-disable-line @typescript-eslint/no-unused-vars
 		conversationId,
 	}) => {
@@ -441,12 +495,14 @@ export async function endpointDatabricksAzure(
 			messages: formattedMessages,
 			stream: true,
 			...mappedParams,
+			...(tools && tools.length > 0 && { tools }),
 			...extraBody,
 		};
 
 		return (async function* () {
 			let tokenId = 0;
 			let generatedText = "";
+			const toolCalls: ToolCallWithParameters[] = [];
 
 			try {
 				// Get OAuth2 access token
@@ -574,7 +630,67 @@ export async function endpointDatabricksAzure(
 										});
 									}
 
-									if (chunk.choices?.[0]?.delta?.content) {
+									// Handle Azure Databricks agent format (custom agents with tools)
+									if (chunk.delta) {
+										// Handle tool calls
+										if (chunk.delta.tool_calls && Array.isArray(chunk.delta.tool_calls)) {
+											for (const toolCall of chunk.delta.tool_calls as AzureDatabricksToolCall[]) {
+												if (toolCall.id && toolCall.function?.name) {
+													const toolCallWithParameters: ToolCallWithParameters = {
+														toolCall: {
+															name: toolCall.function.name,
+															parameters: {},
+															toolId: toolCall.id,
+														},
+														parameterJsonString: toolCall.function.arguments || "{}",
+													};
+													toolCalls.push(toolCallWithParameters);
+												}
+											}
+
+											// Yield tool calls
+											if (toolCalls.length > 0) {
+												yield prepareToolCalls(toolCalls, tokenId++);
+												toolCalls.length = 0; // Clear processed tool calls
+											}
+										}
+
+										// Handle tool results (when role is "tool")
+										if (chunk.delta.role === "tool" && chunk.delta.content) {
+											const toolResult = chunk.delta.content;
+											generatedText += `[Tool Result: ${toolResult}]\n\n`;
+
+											yield {
+												token: {
+													id: tokenId++,
+													text: `[Tool Result: ${toolResult}]\n\n`,
+													logprob: 0,
+													special: false,
+												},
+												generated_text: null,
+												details: null,
+											} satisfies TextGenerationStreamOutput;
+										}
+
+										// Handle regular content from agent
+										if (chunk.delta.content && chunk.delta.role === "assistant") {
+											const content = chunk.delta.content;
+											generatedText += content;
+
+											yield {
+												token: {
+													id: tokenId++,
+													text: content,
+													logprob: 0,
+													special: false,
+												},
+												generated_text: null,
+												details: null,
+											} satisfies TextGenerationStreamOutput;
+										}
+									}
+									// Handle standard OpenAI format (fallback)
+									else if (chunk.choices?.[0]?.delta?.content) {
 										const content = chunk.choices[0].delta.content;
 										generatedText += content;
 
@@ -590,8 +706,8 @@ export async function endpointDatabricksAzure(
 										} satisfies TextGenerationStreamOutput;
 									}
 
-									// Handle finish_reason
-									if (chunk.choices?.[0]?.finish_reason) {
+									// Handle finish_reason (both formats)
+									if (chunk.choices?.[0]?.finish_reason || chunk.delta?.finish_reason) {
 										yield {
 											token: {
 												id: tokenId++,
