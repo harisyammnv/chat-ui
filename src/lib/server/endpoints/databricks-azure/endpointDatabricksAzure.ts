@@ -1,9 +1,8 @@
 import { z } from "zod";
 import type { Endpoint, EndpointMessage } from "../endpoints";
 import type { TextGenerationStreamOutput } from "@huggingface/inference";
-import type { ToolCall } from "$lib/types/Tool";
 
-// Types for Azure Databricks tool calls
+// Types for Azure Databricks tool calls (for display purposes)
 type AzureDatabricksToolCall = {
 	id: string;
 	type: "function";
@@ -12,49 +11,6 @@ type AzureDatabricksToolCall = {
 		arguments: string;
 	};
 };
-
-type ToolCallWithParameters = {
-	toolCall: ToolCall;
-	parameterJsonString: string;
-};
-
-/**
- * Prepares tool calls for output in TextGenerationStreamOutput format
- * @param toolCallsWithParameters Array of tool calls with parameters
- * @param tokenId Current token ID
- * @returns TextGenerationStreamOutput with tool calls
- */
-function prepareToolCalls(
-	toolCallsWithParameters: ToolCallWithParameters[],
-	tokenId: number
-): TextGenerationStreamOutput {
-	const toolCalls: ToolCall[] = [];
-
-	for (const toolCallWithParameters of toolCallsWithParameters) {
-		// Parse the JSON parameters
-		const s = toolCallWithParameters.parameterJsonString.replace(/\n/g, "");
-		const params = JSON.parse(s);
-
-		const toolCall = toolCallWithParameters.toolCall;
-		for (const name in params) {
-			toolCall.parameters[name] = params[name];
-		}
-
-		toolCalls.push(toolCall);
-	}
-
-	return {
-		token: {
-			id: tokenId,
-			text: "",
-			logprob: 0,
-			special: false,
-			toolCalls,
-		} as TextGenerationStreamOutput["token"] & { toolCalls?: ToolCall[] },
-		generated_text: null,
-		details: null,
-	};
-}
 
 // Token cache for OAuth2 tokens
 interface TokenCache {
@@ -476,7 +432,7 @@ export async function endpointDatabricksAzure(
 		messages,
 		preprompt,
 		generateSettings,
-		tools,
+		tools, // eslint-disable-line @typescript-eslint/no-unused-vars
 		toolResults, // eslint-disable-line @typescript-eslint/no-unused-vars
 		conversationId,
 	}) => {
@@ -495,14 +451,12 @@ export async function endpointDatabricksAzure(
 			messages: formattedMessages,
 			stream: true,
 			...mappedParams,
-			...(tools && tools.length > 0 && { tools }),
 			...extraBody,
 		};
 
 		return (async function* () {
 			let tokenId = 0;
 			let generatedText = "";
-			const toolCalls: ToolCallWithParameters[] = [];
 
 			try {
 				// Get OAuth2 access token
@@ -632,30 +586,70 @@ export async function endpointDatabricksAzure(
 
 									// Handle Azure Databricks agent format (custom agents with tools)
 									if (chunk.delta) {
-										// Handle tool calls and yield them immediately when they appear
+										// Handle tool calls - render them as formatted content for display
 										if (chunk.delta.tool_calls && Array.isArray(chunk.delta.tool_calls)) {
 											for (const toolCall of chunk.delta.tool_calls as AzureDatabricksToolCall[]) {
 												if (toolCall.id && toolCall.function?.name) {
-													const toolCallWithParameters: ToolCallWithParameters = {
-														toolCall: {
-															name: toolCall.function.name,
-															parameters: {},
-															toolId: toolCall.id,
-														},
-														parameterJsonString: toolCall.function.arguments || "{}",
-													};
-													toolCalls.push(toolCallWithParameters);
-												}
-											}
+													// Parse arguments to display them nicely
+													let parsedArgs = {};
+													try {
+														parsedArgs = JSON.parse(toolCall.function.arguments || "{}");
+													} catch (e) {
+														parsedArgs = { raw: toolCall.function.arguments };
+													}
 
-											// Yield tool calls immediately (Azure Databricks doesn't use finish_reason)
-											if (toolCalls.length > 0) {
-												yield prepareToolCalls(toolCalls, tokenId++);
-												toolCalls.length = 0; // Clear processed tool calls
+													// Format tool call as structured content that can be parsed by UI
+													const toolCallDisplay =
+														`<tool-call data-name="${toolCall.function.name}" data-id="${toolCall.id}">\n` +
+														`🔧 **Using Tool: ${toolCall.function.name}**\n\n` +
+														`**Parameters:**\n${Object.entries(parsedArgs)
+															.map(([key, value]) => `- **${key}**: ${JSON.stringify(value)}`)
+															.join("\n")}\n` +
+														`</tool-call>\n\n`;
+
+													generatedText += toolCallDisplay;
+
+													yield {
+														token: {
+															id: tokenId++,
+															text: toolCallDisplay,
+															logprob: 0,
+															special: false,
+														},
+														generated_text: null,
+														details: null,
+													} satisfies TextGenerationStreamOutput;
+												}
 											}
 										}
 
-										// Handle regular content from agent (including initial message with tool calls)
+										// Handle tool results - render them as structured content for display
+										if (chunk.delta.role === "tool" && chunk.delta.content) {
+											const toolName = chunk.delta.name || "Tool";
+											const toolResult = chunk.delta.content;
+
+											// Format tool result as structured content that can be parsed by UI
+											const toolResultDisplay =
+												`<tool-result data-name="${toolName}">\n` +
+												`📊 **${toolName} Result:**\n\n` +
+												`\`\`\`json\n${toolResult.substring(0, 1000)}${toolResult.length > 1000 ? "\n...(truncated)" : ""}\n\`\`\`\n` +
+												`</tool-result>\n\n`;
+
+											generatedText += toolResultDisplay;
+
+											yield {
+												token: {
+													id: tokenId++,
+													text: toolResultDisplay,
+													logprob: 0,
+													special: false,
+												},
+												generated_text: null,
+												details: null,
+											} satisfies TextGenerationStreamOutput;
+										}
+
+										// Handle regular content from agent
 										if (chunk.delta.content && chunk.delta.role === "assistant") {
 											const content = chunk.delta.content;
 											generatedText += content;
@@ -671,9 +665,6 @@ export async function endpointDatabricksAzure(
 												details: null,
 											} satisfies TextGenerationStreamOutput;
 										}
-
-										// Skip tool results - they should be handled by the chat UI automatically
-										// Don't yield anything for role: "tool" chunks
 									}
 									// Handle standard OpenAI format (fallback)
 									else if (chunk.choices?.[0]?.delta?.content) {
